@@ -67,6 +67,37 @@ const toView = value => {
   )
 }
 
+// Helper to convert Uint8Array to standard base64
+const toStandardBase64 = (bytes) => {
+  // Convert Uint8Array to Buffer if needed
+  const buffer = Buffer.isBuffer(bytes) ? bytes : Buffer.from(bytes)
+  return buffer.toString('base64')
+}
+
+// CRITICAL: These components are "derived" in RFC 9421 and HyperBEAM adds @ prefix
+// to them in the signature-params line. We must match this behavior.
+// See dev_codec_httpsig_siginfo.erl DERIVED_COMPONENTS
+const DERIVED_COMPONENTS = [
+  'method',
+  'target-uri',
+  'authority',
+  'scheme',
+  'request-target',
+  'path',
+  'query',
+  'query-param',
+]
+
+// Add @ prefix to derived component names (for params line only)
+const addDerivedSpecifiers = (componentName) => {
+  // Remove existing @ prefix if present, then add if derived
+  const stripped = componentName.startsWith('@') ? componentName.slice(1) : componentName
+  if (DERIVED_COMPONENTS.includes(stripped)) {
+    return `@${stripped}`
+  }
+  return componentName
+}
+
 export const toHttpSigner = signer => {
   const params = ["alg", "keyid"].sort()
   return async ({ request, fields }) => {
@@ -81,10 +112,14 @@ export const toHttpSigner = signer => {
 
       const publicKeyBuffer = toView(publicKey)
 
+      // FIX: Use standard base64 for keyid with "publickey:" prefix
+      // HyperBEAM's apply_scheme uses Erlang's base64:decode which expects standard base64
+      // (see dev_codec_httpsig_keyid.erl line 100)
+      // The commitment's keyid field must exactly match what's in the signature-params
       const signingParameters = createSigningParameters({
         params,
         paramValues: {
-          keyid: base64url.encode(publicKeyBuffer),
+          keyid: `publickey:${toStandardBase64(publicKeyBuffer)}`,
           alg,
         },
       })
@@ -96,9 +131,17 @@ export const toHttpSigner = signer => {
         { fields: sortedFields },
         request
       )
+      // CRITICAL: HyperBEAM adds @ prefix to derived components in the params line
+      // The component lines use the original names, but the params line uses @-prefixed names
+      // for derived components (authority, path, method, etc.)
       signatureInput = serializeList([
         [
-          signatureBaseArray.map(([item]) => parseItem(item)),
+          signatureBaseArray.map(([item]) => {
+            // Item is like '"authority"' - need to extract, add specifier, re-quote
+            const unquoted = item.replace(/^"|"$/g, '')
+            const withSpecifier = addDerivedSpecifiers(unquoted)
+            return parseItem(`"${withSpecifier}"`)
+          }),
           signingParameters,
         ],
       ])

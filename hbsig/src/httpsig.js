@@ -142,8 +142,10 @@ function groupIds(map) {
 
   for (const [key, value] of Object.entries(map)) {
     if (isId(key) && typeof value === "string") {
-      // Store with lowercase key as in Erlang
-      idDict[key.toLowerCase()] = value
+      // FIX: Preserve case for commitment IDs (base64url is case-sensitive)
+      // Previous code lowercased keys, but HyperBEAM's commitment IDs like
+      // "3Dmi2IVTNFi-c7hjsuEr5D3kLNRwvLXFdj4REIzdwT4" must keep their case
+      idDict[key] = value
     } else {
       stripped[key] = value
     }
@@ -157,8 +159,7 @@ function groupIds(map) {
     stripped["ao-ids"] = items.join(", ")
   }
 
-  // Return IDs as lowercase in the result since they will be normalized
-  // when processed as headers
+  // Return IDs preserving their original case (base64url is case-sensitive)
   for (const [k, v] of Object.entries(idDict)) {
     stripped[k] = v
   }
@@ -200,8 +201,9 @@ function groupMaps(map, parent = "", top = {}) {
   const entries = Object.entries(map).sort(([a], [b]) => a.localeCompare(b))
 
   for (const [key, value] of entries) {
-    // Normalize keys to lowercase
-    const normKey = normalizeKey(key)
+    // FIX: Preserve case for ID keys (43-char base64url strings like commitment IDs)
+    // HTTP header names should be normalized to lowercase, but base64url IDs are case-sensitive
+    const normKey = isId(key) ? key : normalizeKey(key)
     const flatK = parent ? `${parent}/${normKey}` : normKey
 
     if (

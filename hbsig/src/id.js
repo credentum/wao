@@ -69,11 +69,40 @@ function rsaid(commitment) {
 }
 
 /**
+ * HyperBEAM's derived components (from dev_codec_httpsig_siginfo.erl)
+ * These get @ prefix in the signature-params line but NOT in component lines
+ */
+const DERIVED_COMPONENTS = [
+  "method",
+  "target-uri",
+  "authority",
+  "scheme",
+  "request-target",
+  "path",
+  "query",
+  "query-param"
+]
+
+/**
+ * Add @ prefix to derived components (like HyperBEAM's add_derived_specifiers)
+ */
+function addDerivedSpecifiers(components) {
+  return components.map(comp => {
+    const clean = comp.replace(/"/g, "").replace(/^@/, "")
+    if (DERIVED_COMPONENTS.includes(clean)) {
+      return `"@${clean}"`
+    }
+    return `"${clean}"`
+  })
+}
+
+/**
  * Generate HMAC commitment ID for HyperBEAM messages
  * The ID is deterministic based on message content only
  *
- * The Erlang implementation sorts components WITH @ prefix included,
- * then removes @ from derived components in the signature base.
+ * CRITICAL: HyperBEAM's signature base format:
+ * - Component lines: NO @ prefix (e.g., "authority": value)
+ * - Params line: YES @ prefix for derived components (e.g., ("@authority" ...))
  *
  * @param {Object} message - The message with signature and signature-input
  * @returns {string} The commitment ID in base64url format
@@ -85,24 +114,19 @@ function hmacid(message) {
     throw new Error("Failed to parse signature-input")
   }
 
-  // Sort components AS-IS (with quotes and @ prefix)
-  const sortedComponents = [...parsed.components].sort()
+  // Clean components (remove quotes, remove @ prefix if present)
+  const cleanComponents = parsed.components.map(c =>
+    c.replace(/"/g, "").replace(/^@/, "")
+  )
+
+  // Sort components
+  const sortedComponents = [...cleanComponents].sort()
 
   // Build signature base in sorted order
   const lines = []
 
   sortedComponents.forEach(component => {
-    const cleanComponent = component.replace(/"/g, "")
-    let fieldName = cleanComponent
-    let value
-
-    // For derived components (starting with @), remove @ in the signature base
-    if (cleanComponent.startsWith("@")) {
-      fieldName = cleanComponent.substring(1)
-      value = message[fieldName]
-    } else {
-      value = message[cleanComponent]
-    }
+    let value = message[component]
 
     if (value === undefined || value === null) {
       value = ""
@@ -110,21 +134,22 @@ function hmacid(message) {
       value = value.toString()
     }
 
-    lines.push(`"${fieldName}": ${value}`)
+    // Component lines: NO @ prefix (even for derived components)
+    lines.push(`"${component}": ${value}`)
   })
 
-  // Add signature-params line with sorted components (keeping @ prefix)
-  const paramsComponents = sortedComponents.join(" ")
+  // Add signature-params line WITH @ prefix for derived components
+  // This matches HyperBEAM's signature_params_line which calls add_derived_specifiers
+  const paramsComponents = addDerivedSpecifiers(sortedComponents).join(" ")
   lines.push(
-    `"@signature-params": (${paramsComponents});alg="hmac-sha256";keyid="ao"`
+    `"@signature-params": (${paramsComponents});alg="hmac-sha256";keyid="constant:ao"`
   )
 
   const signatureBase = lines.join("\n")
 
-  // Generate HMAC with key "ao"
-  // Convert string to Uint8Array
+  // HMAC key is "constant:ao" (the full keyid including scheme prefix)
   const messageBytes = new TextEncoder().encode(signatureBase)
-  const keyBytes = new TextEncoder().encode("ao")
+  const keyBytes = new TextEncoder().encode("constant:ao")
 
   const hmacResult = hmac(keyBytes, messageBytes)
   return uint8ArrayToBase64url(hmacResult)
@@ -223,32 +248,28 @@ function parseSignatureInput(sigInput) {
 
 /**
  * Calculate HMAC commitment ID for HyperBEAM messages
+ *
+ * CRITICAL: Signature base format must match HyperBEAM:
+ * - Component lines: NO @ prefix
+ * - Params line: YES @ prefix for derived components
  */
 function calculateHmacId(message) {
   if (!message["signature-input"]) {
     throw new Error("HMAC calculation requires signature-input")
   }
 
-  // Parse components from signature-input
-  const components = parseSignatureInput(message["signature-input"])
+  // Parse components from signature-input and clean them
+  const rawComponents = parseSignatureInput(message["signature-input"])
+  const cleanComponents = rawComponents.map(c => c.replace(/^@/, ""))
 
-  // Sort components AS-IS (with @ prefix)
-  const sortedComponents = [...components].sort()
+  // Sort components
+  const sortedComponents = [...cleanComponents].sort()
 
   // Build signature base in sorted order
   const lines = []
 
   for (const component of sortedComponents) {
-    let fieldName = component
-    let value
-
-    // For derived components (starting with @), remove @ in the signature base
-    if (component.startsWith("@")) {
-      fieldName = component.substring(1)
-      value = message[fieldName]
-    } else {
-      value = message[component]
-    }
+    let value = message[component]
 
     if (value === undefined || value === null) {
       value = ""
@@ -256,20 +277,20 @@ function calculateHmacId(message) {
       value = value.toString()
     }
 
-    lines.push(`"${fieldName}": ${value}`)
+    // Component lines: NO @ prefix
+    lines.push(`"${component}": ${value}`)
   }
 
-  // Add signature-params line with sorted components (keeping @ prefix)
-  const paramsComponents = sortedComponents.join(" ")
+  // Params line: YES @ prefix for derived components
+  const paramsComponents = addDerivedSpecifiers(sortedComponents).join(" ")
   lines.push(
-    `"@signature-params": (${paramsComponents});alg="hmac-sha256";keyid="ao"`
+    `"@signature-params": (${paramsComponents});alg="hmac-sha256";keyid="constant:ao"`
   )
 
   const signatureBase = lines.join("\n")
 
-  // Generate HMAC with key "ao"
   const messageBytes = new TextEncoder().encode(signatureBase)
-  const keyBytes = new TextEncoder().encode("ao")
+  const keyBytes = new TextEncoder().encode("constant:ao")
 
   const hmacResult = hmac(keyBytes, messageBytes)
   return uint8ArrayToBase64url(hmacResult)
@@ -277,59 +298,39 @@ function calculateHmacId(message) {
 
 /**
  * Calculate unsigned message ID following the exact Erlang flow
+ *
+ * CRITICAL: Signature base format must match HyperBEAM:
+ * - Component lines: NO @ prefix
+ * - Params line: YES @ prefix for derived components
  */
 function calculateUnsignedId(message) {
-  // Derived components from Erlang ?DERIVED_COMPONENTS
-  const DERIVED_COMPONENTS = [
-    "method",
-    "target-uri",
-    "authority",
-    "scheme",
-    "request-target",
-    "path",
-    "query",
-    "query-param",
-    "status",
-  ]
-
   // Convert message for httpsig format
   const httpsigMsg = {}
   for (const [key, value] of Object.entries(message)) {
     httpsigMsg[key.toLowerCase()] = value
   }
 
-  // Get keys and add @ to derived components
-  const keys = Object.keys(httpsigMsg)
-  const componentsWithPrefix = keys
-    .map(key => {
-      // Check if this is a derived component
-      if (DERIVED_COMPONENTS.includes(key.replace(/_/g, "-"))) {
-        return "@" + key
-      }
-      return key
-    })
-    .sort() // Sort AFTER adding @ prefix
+  // Get keys and sort them
+  const keys = Object.keys(httpsigMsg).sort()
 
-  // Build signature base - use the components in order
+  // Build signature base - component lines have NO @ prefix
   const lines = []
-  for (const component of componentsWithPrefix) {
-    const key = component.replace("@", "")
+  for (const key of keys) {
     const value = httpsigMsg[key]
     const valueStr = typeof value === "string" ? value : String(value)
     lines.push(`"${key}": ${valueStr}`)
   }
 
-  // Add signature-params line with the @ prefixes
-  const componentsList = componentsWithPrefix.map(k => `"${k}"`).join(" ")
+  // Params line: YES @ prefix for derived components
+  const paramsComponents = addDerivedSpecifiers(keys).join(" ")
   lines.push(
-    `"@signature-params": (${componentsList});alg="hmac-sha256";keyid="ao"`
+    `"@signature-params": (${paramsComponents});alg="hmac-sha256";keyid="constant:ao"`
   )
 
   const signatureBase = lines.join("\n")
 
-  // HMAC with key "ao"
   const messageBytes = new TextEncoder().encode(signatureBase)
-  const keyBytes = new TextEncoder().encode("ao")
+  const keyBytes = new TextEncoder().encode("constant:ao")
 
   const hmacResult = hmac(keyBytes, messageBytes)
   return uint8ArrayToBase64url(hmacResult)
