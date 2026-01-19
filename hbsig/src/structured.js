@@ -258,6 +258,15 @@ function parseStructuredList(value) {
   })
 }
 
+// Helper to check if a value is an ID (43 character base64url string)
+function isId(value) {
+  return (
+    typeof value === "string" &&
+    value.length === 43 &&
+    /^[A-Za-z0-9_-]+$/.test(value)
+  )
+}
+
 /**
  * Convert rich message to TABM (mirrors Erlang's from/1)
  * @param {object} msg - Rich message
@@ -274,10 +283,11 @@ function from(msg) {
     return msg
   }
 
-  // Normalize keys first
+  // Normalize keys - BUT preserve case for ID keys (43-char base64url strings)
+  // HTTP header names should be lowercase, but commitment IDs are case-sensitive
   const normalizedMap = {}
   for (const [key, value] of Object.entries(msg)) {
-    const normKey = key.toLowerCase()
+    const normKey = isId(key) ? key : key.toLowerCase()
     normalizedMap[normKey] = value
   }
 
