@@ -134,7 +134,19 @@ export function extractPubKey(headers, signatureName) {
   if (!keyid) return null
 
   try {
-    return base64url.toBuffer(keyid)
+    // Strip the prefix from keyid (e.g., "publickey:base64data" or "constant:ao")
+    // The keyid format is "type:value" where type is usually "publickey" or "constant"
+    let keyData = keyid
+    if (keyid.includes(':')) {
+      const colonIndex = keyid.indexOf(':')
+      keyData = keyid.substring(colonIndex + 1)
+    }
+
+    // The keyid uses standard base64 (+ and /), not base64url (- and _)
+    // Convert to base64url format for the decoder
+    const keyDataBase64url = keyData.replace(/\+/g, '-').replace(/\//g, '_')
+
+    return base64url.toBuffer(keyDataBase64url)
   } catch (error) {
     return null
   }
