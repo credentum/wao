@@ -234,18 +234,9 @@ const smartSign = async (obj, path) => {
     })
     const result = await enc(normalized)
 
-    // enc() returns { headers: {...}, body: ... }
-    // We need to flatten this for httpsig_to
-    const flattened = {
-      ...result.headers,
-      body: result.body,
-      ...(path && { path }),
-    }
-
-    // httpsig_to expects the structured format
-    const encoded = httpsig_to(flattened)
-
-    return encoded
+    // enc() returns { headers: {...}, body: ... } already properly encoded
+    // Just return it directly - don't pass through httpsig_to which would re-encode
+    return result
   } catch (error) {
     console.error("Encoding failed:", error)
 
@@ -276,18 +267,42 @@ const encode = async (obj, path) => {
     return await enc(filtered)
   }
 
+  // NOTE: For body with content-digest and data, we let httpsig_to handle it
+  // httpsig_to correctly puts data as body content with inline-body-key: data
+  // It does NOT put data as a header - that was a misconception
+
   // Otherwise use the standard pipeline
   let fields = { ...filtered }
   // Only add path if explicitly provided
   if (path) fields.path = path
 
+  // Special case: if input has body with both data and content-digest,
+  // we need to use enc() which properly handles data as separate body part
+  // This matches how spawn works (no data in inline part, no inline-body-key header)
+  if (filtered.body && typeof filtered.body === 'object' &&
+      'data' in filtered.body && 'content-digest' in filtered.body) {
+    const wrapped = { body: filtered.body }
+    if (path) wrapped.path = path
+    const encoded = await enc(wrapped)
+    // Remove inline-body-key to match spawn format
+    delete encoded.headers['inline-body-key']
+    return encoded
+  }
+
   // Try the standard encoding pipeline
-  const encoded = httpsig_to(normalize(structured_from(normalize(fields))))
+  const normalized = normalize(fields)
+  const structured = structured_from(normalized)
+  const encoded = httpsig_to(normalize(structured))
 
   // Check if the encoded result is valid for HTTP headers
-  if (!isValid(encoded)) {
-    // If invalid, fall back to enc()
-    return await enc(filtered)
+  const valid = isValid(encoded)
+  if (!valid) {
+    // If invalid (e.g., has complex objects like commitments), fall back to enc()
+    // IMPORTANT: Wrap flat structure in { body: ... } so enc() can properly handle it
+    // This ensures inline-body-key gets set when there's a data field
+    const wrapped = { body: filtered }
+    if (path) wrapped.path = path
+    return await enc(wrapped)
   }
 
   // For non-binary data, return in the same format as enc()
@@ -349,10 +364,9 @@ async function _sign({
   // Only add path header if path is provided
   if (path) headersObj["path"] = path
 
-  if (body && !headersObj["content-length"]) {
-    const bodySize = body.size || body.byteLength || 0
-    if (bodySize > 0) headersObj["content-length"] = String(bodySize)
-  }
+  // NOTE: Don't add content-length automatically - it causes signing issues
+  // HyperBEAM spawn messages don't have content-length signed, so we shouldn't either
+  // The HTTP layer will add content-length based on actual body size
 
   const lowercaseHeaders = {}
   for (const [key, value] of Object.entries(headersObj)) {
@@ -369,7 +383,10 @@ async function _sign({
   let isPath = false
   const signingFields = Object.keys(lowercaseHeaders).filter(key => {
     if (key === "path") isPath = true
-    return key !== "body-keys" && key !== "path" && !bodyKeys.includes(key)
+    // Don't sign metadata headers: body-keys, inline-body-key, path, and body keys themselves
+    // inline-body-key is structural metadata indicating which field is inline, not actual message content
+    // Signing it would add it to committed fields, but httpsig_to doesn't sign it for body messages
+    return key !== "body-keys" && key !== "inline-body-key" && key !== "path" && !bodyKeys.includes(key)
   })
 
   // Only add @path if signPath is enabled AND path header exists

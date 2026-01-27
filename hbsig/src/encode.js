@@ -654,6 +654,12 @@ function processObjectFields(value, bodyKey, sortedBodyKeys) {
   const fieldLines = []
   const binaryFields = []
   const arrayTypes = []
+  let bodyContent = null
+
+  // NOTE: When content-digest and data both exist, data goes to a SEPARATE body part (body/data)
+  // via collectBodyKeys. We do NOT put data as body content of the inline part.
+  // This keeps the inline part clean (only committed fields as headers).
+  const dataAsBodyContent = false
 
   // First collect array types
   for (const [k, v] of Object.entries(value)) {
@@ -669,6 +675,12 @@ function processObjectFields(value, bodyKey, sortedBodyKeys) {
     const childPath = `${bodyKey}/${k}`
 
     if (sortedBodyKeys.includes(childPath)) {
+      continue
+    }
+
+    // Skip data field if it should be body content
+    if (dataAsBodyContent && k === 'data') {
+      bodyContent = v
       continue
     }
 
@@ -733,7 +745,7 @@ function processObjectFields(value, bodyKey, sortedBodyKeys) {
   }
 
   const allTypes = [...arrayTypes, ...objectTypes]
-  return { allTypes, fieldLines, binaryFields }
+  return { allTypes, fieldLines, binaryFields, bodyContent }
 }
 
 // Step 13.2.4.5: Create object body part
@@ -743,24 +755,38 @@ function createObjectBodyPart(
   allTypes,
   fieldLines,
   binaryFields,
+  bodyContent,
   headers,
   sortedBodyKeys
 ) {
   const isInline = bodyKey === "body" && headers["inline-body-key"] === "body"
-  const lines = []
 
   if (isInline) {
-    const orderedLines = []
+    // For inline mode: collect all entries and sort alphabetically (matches httpsig_to behavior)
+    const allEntries = []
 
-    // For inline mode: fields first, then headers
+    // Add field lines as entries
     for (const line of fieldLines) {
-      orderedLines.push(line)
+      const colonPos = line.indexOf(": ")
+      if (colonPos > 0) {
+        const key = line.substring(0, colonPos)
+        allEntries.push({ key, line })
+      } else {
+        allEntries.push({ key: line, line })
+      }
     }
 
     if (allTypes.length > 0) {
-      orderedLines.push(`ao-types: ${allTypes.sort().join(", ")}`)
+      allEntries.push({ key: "ao-types", line: `ao-types: ${allTypes.sort().join(", ")}` })
     }
-    orderedLines.push("content-disposition: inline")
+
+    // Add content-disposition as an entry for sorting
+    allEntries.push({ key: "content-disposition", line: "content-disposition: inline" })
+
+    // Sort all entries alphabetically by key
+    allEntries.sort((a, b) => a.key.localeCompare(b.key))
+
+    const orderedLines = allEntries.map(entry => entry.line)
 
     const binaryFieldsForInline = Object.entries(value)
       .filter(
@@ -780,14 +806,24 @@ function createObjectBodyPart(
         parts.push(Buffer.from(`\r\n${key}: `))
         parts.push(buffer)
       }
-      parts.push(Buffer.from("\r\n"))
+      // Add body content if present
+      if (bodyContent) {
+        parts.push(Buffer.from("\r\n\r\n"))
+        parts.push(Buffer.from(bodyContent))
+      }
       const fullBody = Buffer.concat(parts)
       return new Blob([fullBody])
+    } else if (bodyContent) {
+      // Has body content (data extracted from headers)
+      // Format: headers, empty line, body content
+      const headerText = orderedLines.join("\r\n")
+      return new Blob([headerText + "\r\n\r\n" + bodyContent])
     } else {
-      return new Blob([orderedLines.join("\r\n") + "\r\n"])
+      // No trailing \r\n - assembleMultipartBody adds the separator
+      return new Blob([orderedLines.join("\r\n")])
     }
   } else {
-    // Non-inline mode remains the same
+    // Non-inline mode
     const orderedLines = []
     if (allTypes.length > 0) {
       orderedLines.push(`ao-types: ${allTypes.sort().join(", ")}`)
@@ -866,7 +902,7 @@ function handleObjectValue(
     return null
   }
 
-  const { allTypes, fieldLines, binaryFields } = processObjectFields(
+  const { allTypes, fieldLines, binaryFields, bodyContent } = processObjectFields(
     value,
     bodyKey,
     sortedBodyKeys
@@ -905,6 +941,7 @@ function handleObjectValue(
     allTypes,
     fieldLines,
     binaryFields,
+    bodyContent,
     headers,
     sortedBodyKeys
   )
@@ -1101,7 +1138,9 @@ function setFinalHeaders(headers, boundary, contentDigest, byteLength) {
     headers["content-digest"] = `sha-256=:${contentDigest}:`
   }
 
-  headers["content-length"] = String(byteLength)
+  // NOTE: Don't set content-length - it causes signing issues with HyperBEAM
+  // Spawn messages don't have content-length signed, so we shouldn't either
+  // The HTTP layer will add content-length based on actual body size
 }
 
 export async function enc(obj = {}) {
@@ -1172,12 +1211,10 @@ export async function enc(obj = {}) {
     headers["body-keys"] = sortedBodyKeys.map(k => `"${k}"`).join(", ")
   }
 
-  // Special case: single body key named "body" containing an object
-  if (
-    !hasSpecialDataBody &&
-    sortedBodyKeys.length === 1 &&
-    sortedBodyKeys[0] === "body"
-  ) {
+  // Set inline-body-key to "body" when "body" is in the body keys and body is a POJO
+  // This ensures the body part gets "content-disposition: inline" instead of "form-data;name='body'"
+  // which matches how httpsig_to handles nested structures
+  if (!hasSpecialDataBody && sortedBodyKeys.includes("body")) {
     const bodyValue = obj.body
     if (isPojo(bodyValue)) {
       headers["inline-body-key"] = "body"

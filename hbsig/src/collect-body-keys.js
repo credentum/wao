@@ -276,6 +276,13 @@ class BodyKeyCollector {
       }
     }
 
+    // When object has content-digest and data fields, add body/data as a separate body part
+    // This keeps the inline part clean (only committed fields as headers)
+    // The data is verified by content-digest
+    if ('content-digest' in obj && 'data' in obj && typeof obj.data === 'string') {
+      this.keys.push(`${key}/data`)
+    }
+
     // Traverse the object
     this.traverse(obj, key)
   }
