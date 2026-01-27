@@ -298,9 +298,10 @@ const encode = async (obj, path) => {
   const valid = isValid(encoded)
   if (!valid) {
     // If invalid (e.g., has complex objects like commitments), fall back to enc()
-    // IMPORTANT: Wrap flat structure in { body: ... } so enc() can properly handle it
-    // This ensures inline-body-key gets set when there's a data field
-    const wrapped = { body: filtered }
+    // NOTE: Only wrap in { body: ... } if filtered doesn't already have a body key.
+    // Otherwise we get double nesting like { body: { body: ... } } which breaks
+    // the commitments handling in collectBodyKeys.
+    const wrapped = 'body' in filtered ? { ...filtered } : { body: filtered }
     if (path) wrapped.path = path
     return await enc(wrapped)
   }
